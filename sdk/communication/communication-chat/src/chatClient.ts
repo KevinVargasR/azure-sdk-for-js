@@ -44,15 +44,15 @@ import { tracingClient } from "./generated/src/tracing.js";
 /**
  * Options for starting realtime notifications.
  */
-export interface StartRealtimeNotificationsOptions {
+export interface pollingOptions {
   /**
    * List of thread IDs to poll for messages.
    */
-  idThreadsWithPolling?: string[];
+  pollingThreadsIDs?: string[];
   /**
    * Frequency to poll for messages.
    */
-  pollingFrequency?: number;
+  pollingFrequency?: 5000 | 10000 | 20000 | 30000 | 60000 | 600000;
 }
 
 declare interface InternalChatClientOptions extends ChatClientOptions {
@@ -69,13 +69,22 @@ export class ChatClient {
   private readonly signalingClient: SignalingClient | undefined = undefined;
   private readonly emitter = new EventEmitter();
   private isRealtimeNotificationsStarted: boolean = false;
-  private isPollingActive: boolean = false;
-  private threadsWithPolling: Map<string, ChatThreadClient> = new Map();
-  private pollingFrequency: number = 20000;
-  private isPollingRunning: boolean = false;
   private messagesDetected: [string, string][] = [];
-
-
+  /* Map to store threads with polling enabled.
+  * The key is the thread ID and the value is the ChatThreadClient instance.*/
+  private threadsWithPolling: Map<string, ChatThreadClient> = new Map();
+  /**
+   * Polling frequency in milliseconds.
+   * Default is set to 20 seconds (20000 ms).
+   * Can be set to one of the following values: 5000, 10000, 20000, 30000, 60000, 600000.
+   */
+  private pollingFrequency: 5000 | 10000 | 20000 | 30000 | 60000 | 600000 = 20000; // Default polling frequency set to 20 seconds
+  /* Indicates if polling is active
+  * If true, the client will poll for messages in the specified threads.*/
+  private isPollingEnable: boolean = false;
+  /*Flag to indicate if polling is running.
+  * This is used to prevent multiple polling loops from running at the same time.*/
+  private isPollingRunning: boolean = false;
 
   /**
    * Creates an instance of the ChatClient for a given resource and user.
@@ -246,14 +255,13 @@ export class ChatClient {
     );
   }
 
-
   /**
    * Start receiving realtime notifications.
    * Call this function before subscribing to any event.
-   * To add polling for messages as a backup mechanism, its necessary to add options parameter with the idThreadsWithPolling array.
+   * To add polling for messages as a backup mechanism, its necessary to add options parameter with the pollingThreadsIDs array.
    * @param options - Options for starting realtime notifications.
    */
-  public async startRealtimeNotifications(options?: StartRealtimeNotificationsOptions): Promise<void> {
+  public async startRealtimeNotifications(options?: pollingOptions): Promise<void> {
     if (this.signalingClient === undefined) {
       throw new Error("Realtime notifications are not supported in node js.");
     }
@@ -272,9 +280,9 @@ export class ChatClient {
      * The dynamicPolling flag will determine if the polling frequency should change based on the last time RTN worked.
      */
     if (options !== undefined) {
-      const { idThreadsWithPolling, pollingFrequency, } = options;
-      if (idThreadsWithPolling !== undefined) {
-        for (const threadId of idThreadsWithPolling) {
+      const { pollingThreadsIDs, pollingFrequency, } = options;
+      if (pollingThreadsIDs !== undefined) {
+        for (const threadId of pollingThreadsIDs) {
           const chatThreadClient = this.getChatThreadClient(threadId);
           this.threadsWithPolling.set(threadId, chatThreadClient);
         }
@@ -313,13 +321,9 @@ export class ChatClient {
   * @param value - The new value for the polling frequency.
   * @throws Error if the value is not a positive number. 
   */
-  public updatePollingFrequency(value: number): void {
-    if (value <= 0) {
-      throw new Error("Polling frequency value must be a positive number.");
-    } else {
-      this.pollingFrequency = value;
-      console.log("Polling with frequency:", this.pollingFrequency);
-    }
+  public updatePollingFrequency(value: 5000 | 10000 | 20000 | 30000 | 60000 | 600000): void {
+    this.pollingFrequency = value;
+    console.log("Polling with frequency:", this.pollingFrequency);
   }
 
   /**
@@ -340,7 +344,7 @@ export class ChatClient {
   }
   /**
    * Stop polling for messages.
-   * This will set isPollingActive to false, stopping the polling loop.
+   * This will set isPollingEnable to false, stopping the polling loop.
    */
   public stopPollingForMessages(): void {
     this.stopPolling();
@@ -348,11 +352,11 @@ export class ChatClient {
 
   /** 
    * Resume polling for messages.
-   * This will set isPollingActive to true, resuming the polling loop.
+   * This will set isPollingEnable to true, resuming the polling loop.
    * If dynamic polling is enabled, it will update the polling frequency to Default.
   */
   public resumePollingForMessages(): void {
-    if (!this.isPollingActive) {
+    if (!this.isPollingEnable) {
       this.startPolling();
     }
   }
@@ -567,15 +571,24 @@ export class ChatClient {
     });
 
     this.signalingClient.on("chatMessageReceived", (payload) => {
-      //This line is commented out to avoid emitting the event twice.
-      this.emitter.emit("chatMessageReceived", payload);
-
-      /* If the thread ID is in the threadsWithPolling map, we will add the message id and thread id to the messagesDetected array.*/
-      if (this.threadsWithPolling.has(payload.threadId)) {
+      //this.emitter.emit("chatMessageReceived", payload); //this line is commented out to simulate unstable conditions of RTN.
+      if (Math.random() < 0.5) {
+        this.emitter.emit("chatMessageReceived", payload);
+        if (this.threadsWithPolling.has(payload.threadId)) {
+          // If the message is already detected, it will not emit the event again.
+          this.messagesDetected.push([payload.id, payload.threadId]);
+          console.log("Message Stored:", payload.id);
+        }
+      } else {
+        console.log("Message Not Emitted:", payload.id);
+      }
+      /* * The following code is commented out to simulate unstable conditions of RTN. 
+      *If the thread ID is in the threadsWithPolling map, we will add the message id and thread id to the messagesDetected array.*/
+      /*if (this.threadsWithPolling.has(payload.threadId)) {
         // If the message is already detected, we will not emit the event again.
         this.messagesDetected.push([payload.id, payload.threadId]);
         console.log("Message Stored:", payload.id);
-      }
+      }*/
     });
 
     this.signalingClient.on("chatMessageEdited", (payload) => {
@@ -614,21 +627,18 @@ export class ChatClient {
       this.emitter.emit("participantsRemoved", payload);
     });
   }
+
   /**
  * Start polling for messages in specified threads.
  * @param threadsWithPolling - List of thread IDs to poll for messages.
  * @param pollingFrequency - Frequency (in milliseconds) to poll for messages.
  */
-
-
   private async startPolling(): Promise<void> {
     if (this.isPollingRunning) return;
-
-    this.isPollingActive = true;
+    this.isPollingEnable = true;
     this.isPollingRunning = true;
-
     const poll = async (): Promise<void> => {
-      if (!this.isPollingActive) {
+      if (!this.isPollingEnable) {
         this.isPollingRunning = false;
         return;
       }
@@ -672,7 +682,7 @@ export class ChatClient {
       }
 
       // Schedule the next poll only after this one finishes
-      if (this.isPollingActive) {
+      if (this.isPollingEnable) {
         console.log("Polling with frequency:", this.pollingFrequency);
         setTimeout(poll, this.pollingFrequency);
       } else {
@@ -684,10 +694,10 @@ export class ChatClient {
   }
   /** 
    * Stop polling for messages.
-   * This will set isPollingActive to false, stopping the polling loop.
+   * This will set isPollingEnable to false, stopping the polling loop.
   */
   private stopPolling(): void {
-    this.isPollingActive = false;
+    this.isPollingEnable = false;
   }
 
 }
