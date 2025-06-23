@@ -41,7 +41,6 @@ import { getSignalingClient } from "./signaling/signalingClient.js";
 import { logger } from "./models/logger.js";
 import { tracingClient } from "./generated/src/tracing.js";
 
-
 /**
  * Polling modes
  */
@@ -66,7 +65,6 @@ export interface pollingOptions {
    * Whether to enable adaptive polling.
    */
   adaptativePolling?: boolean;
-
 }
 
 export type AllowedPollingIntervals = 5000 | 10000 | 20000 | 30000 | 60000 | 600000;
@@ -110,8 +108,8 @@ export class ChatClient {
   private adaptativePolling: boolean = false;
 
   private lastTimeRTNWorked: Date | null = null;
-  //private currentPollingInterval: number = this.pollingIntervals[PollingMode.Default] || 20000; // Default polling frequency
 
+  private firstEmergencyPoll: boolean = false;
   /**
    * Creates an instance of the ChatClient for a given resource and user.
    *
@@ -324,29 +322,35 @@ export class ChatClient {
       }
       // Set the polling intervals based on the provided options
       if (pollingIntervals !== undefined) {
-        const allowedPollingValues: AllowedPollingIntervals[] = [5000, 10000, 20000, 30000, 60000, 600000];
+        const allowedPollingValues = [5000, 10000, 20000, 30000, 60000, 600000];
         if (pollingIntervals.Default !== undefined && allowedPollingValues.includes(pollingIntervals.Default)) {
           this.pollingIntervals[PollingMode.Default] = pollingIntervals.Default;
         } else {
-          console.warn(
-            `Invalid polling interval for Default mode. Using default value of 20000 ms.`,
-          );
+          if (pollingIntervals?.Default !== undefined) {
+            console.warn(
+              `Invalid polling interval for Default mode. Using default value of 20000 ms.`,
+            );
+          }
           this.pollingIntervals[PollingMode.Default] = 20000; // Default polling frequency
         }
         if (pollingIntervals.Idle !== undefined && allowedPollingValues.includes(pollingIntervals.Idle)) {
           this.pollingIntervals[PollingMode.Idle] = pollingIntervals.Idle;
         } else {
-          console.warn(
-            `Invalid polling interval for Idle mode. Using default value of 600000 ms.`,
-          );
+          if (pollingIntervals?.Idle !== undefined) {
+            console.warn(
+              `Invalid polling interval for Idle mode. Using default value of 600000 ms.`,
+            );
+          }
           this.pollingIntervals[PollingMode.Idle] = 600000; // Default idle polling frequency
         }
         if (pollingIntervals.Emergency !== undefined && allowedPollingValues.includes(pollingIntervals.Emergency)) {
           this.pollingIntervals[PollingMode.Emergency] = pollingIntervals.Emergency;
         } else {
-          console.warn(
-            `Invalid polling interval for Emergency mode. Using default value of 5000 ms.`,
-          );
+          if (pollingIntervals?.Emergency !== undefined) {
+            console.warn(
+              `Invalid polling interval for Emergency mode. Using default value of 5000 ms.`,
+            );
+          }
           this.pollingIntervals[PollingMode.Emergency] = 5000; // Default emergency polling frequency
         }
       }
@@ -640,7 +644,7 @@ export class ChatClient {
       this.lastTimeRTNWorked = new Date();
 
       if (this.adaptativePolling && this.currentPollingMode !== PollingMode.Default) {
-        this.currentPollingMode = PollingMode.Default;
+        this.updatePollingMode(PollingMode.Default); //function to return polling to default mode
       }
       //this.emitter.emit("chatMessageReceived", payload); //this line is commented out to simulate unstable conditions of RTN.
       if (Math.random() < 0.5) {
@@ -719,19 +723,6 @@ export class ChatClient {
         /* Check the last time RTN worked 
         * and update the polling frequency accordingly.
         */
-        if (
-          this.adaptativePolling &&
-          Date.now() - (this.lastTimeRTNWorked?.getTime() ?? 0) >
-          (this.pollingIntervals[this.currentPollingMode] ?? 20000) && this.currentPollingMode === PollingMode.Default
-          && this.lastTimeRTNWorked !== null
-        ) {
-          if (this.messagesDetected.length > 0) {
-            this.currentPollingMode = PollingMode.Emergency;
-          } else {
-            this.currentPollingMode = PollingMode.Idle;
-          }
-        }
-        //this.messagesDetected = [];
         /* * Iterate through the threadsWithPolling map and poll for messages in each thread.*/
         for (const [key, chatThread] of this.threadsWithPolling) {
           const returnTime = this.pollingIntervals[this.currentPollingMode] ?? 20000;
@@ -759,6 +750,23 @@ export class ChatClient {
                 this.messagesDetected.push([message.id, key]);
               }
             }
+            console.log("Checking adaptative polling conditions...")
+            if (this.adaptativePolling) {
+              if (
+                Date.now() - (this.lastTimeRTNWorked?.getTime() ?? 0) >
+                (this.pollingIntervals[this.currentPollingMode] ?? 20000) && this.currentPollingMode === PollingMode.Default
+              ) {
+                console.log("No new messages detected, switching to Emergency polling mode.");
+                this.updatePollingMode(PollingMode.Emergency);
+                this.firstEmergencyPoll = true;
+              } else {
+                if (this.currentPollingMode === PollingMode.Emergency && !this.firstEmergencyPoll && messagesArray.length === 0) {
+                  console.log("No new messages found, switching to Idle polling mode.");
+                  this.updatePollingMode(PollingMode.Idle);
+                }
+              }
+              this.firstEmergencyPoll = false; // Reset the firstEmergencyPoll flag after the first check
+            }
           } catch (error) {
             logger.error("Error in polling messages: ", error);
           }
@@ -766,16 +774,15 @@ export class ChatClient {
       } catch (err) {
         logger.error("Polling loop error: ", err);
       }
-
       // Schedule the next poll only after this one finishes
       if (this.isPollingEnable) {
+        this.messagesDetected = []; // Clear the messagesDetected array after each poll
         console.log("Polling with frequency:", this.pollingIntervals[this.currentPollingMode]);
         setTimeout(poll, this.pollingIntervals[this.currentPollingMode]);
       } else {
         this.isPollingRunning = false;
       }
     };
-
     poll();
   }
   /** 
@@ -785,5 +792,4 @@ export class ChatClient {
   private stopPolling(): void {
     this.isPollingEnable = false;
   }
-
 }
